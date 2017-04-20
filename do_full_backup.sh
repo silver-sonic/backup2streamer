@@ -1,24 +1,48 @@
 #!/bin/bash
 
-# ToDos
-#
-# 
-
+# The folder which should be backuped (hint: use links to backup more than one folder at a time)
 SOURCE_FOLDER="/opt/data/backup/backup_folders"
+
+# The device to store the tar file to
 LTO_DEV="/dev/st0"
+
+# Name of the Backup-Set
 BACKUP_NAME="full_backup"
+
+# Where to store information about used tapes
 TAPE_FOLDER="/opt/data/backup/tape_info"
-TAPE_CHECK="1440"
+
+# How long to wait between tape checks (if a tape has been inserted)
 TAPE_DELAY="30s"
-MAIL="backup_phex@stefan.heinrichsen.net"
+
+# How often to try to find a tape (1440 and 30s above will lead to 12h of trying)
+TAPE_CHECK="1440"
+
+# Receiver of result mail
+MAIL="your@email.here"
+
+# set maximum Tape Size
 MAX_TAPE_SIZE="500G"
 
+#
+# You shouldn't need to change some below here
+#
+
+# Todays timestamp
 DATE="$(date +%Y-%m-%d)" 
 TIME="$(date +%H-%M)"
-LOGFILE="$(mktemp -t tar_output_XXX.txt)"
-MESSAGE=""
+
+# Create a temporary filename
+LOGFILE_BASENAME="$(mktemp -t tar_output_XXX)"
+
+# Search in Tape_Folder for the oldest file in the backup-set
 TAPE_OLDFILE="$(ls -tC1 ${TAPE_FOLDER} | tail -n 1)"
 
+MESSAGE=""
+
+#
+# First some general sanity checks
+#
 
 if [ ! -r $SOURCE_FOLDER ]; then
    MESSAGE="ERROR: Source folder does not exist or is not readable."
@@ -36,9 +60,9 @@ if [ ! -z "$MESSAGE" ]; then
    echo $MESSAGE; exit 1
 fi
 
-
-# loop to wait for valid tape (check for 24h (288 time with 5 minutes delay), then give up
-# Format der Serieal ist: C140604093
+#
+# Loop to wait for valid tape (see TAPE_CHECK and TYPE_DELAY parameters); give up after specified tries
+# Hint: Format of serials is similar to C140604093
 
 COUNTER=0
 
@@ -46,7 +70,7 @@ TAPE_SERIAL="$(sg_rmsn -r /dev/st0 2> /dev/null)"
 EXIT_CODE=$?
 
 while [ $COUNTER -lt $TAPE_CHECK -a $EXIT_CODE -ne 0 ]; do
-   # above check was negativ: send mail, wait and recheck
+   # above check was negativ: send one mail, wait and recheck
 
    echo $TAPE_SERIAL
    if [ $EXIT_CODE -ne 0 -a $COUNTER -eq 0 ]; then
@@ -58,7 +82,7 @@ while [ $COUNTER -lt $TAPE_CHECK -a $EXIT_CODE -ne 0 ]; do
       a new one or the oldest of the backup-set.
 
       Currently the oldest tape file seems to be:
-      $TAPE_OLDFILE
+      ${TAPE_OLDFILE%.log}
 
       Best regards,
         backup-script
@@ -80,7 +104,7 @@ if [ $COUNTER -eq $TAPE_CHECK ]; then
    mail -s "Backup - ${BACKUP_NAME} - tape-timeout" $MAIL <<EOM
       Hi Admin,
 
-      even after waiting for the defined timout values: ${TAPE_CHECK} time ${TAPE_DELAY}
+      even after waiting for the defined timout values: ${TAPE_CHECK} times ${TAPE_DELAY}
       no tape was inserted. I gave up...
 
       Best regards,
@@ -90,10 +114,8 @@ EOM
    exit 1;
 fi
 
-# For development only
-# TAPE_SERIAL="C140604093"
-
 TAPE_FILE="${TAPE_FOLDER}/${TAPE_SERIAL}.log"
+
 # So we should have a tape serial now, will check existing tape infos now
 
 # First check if it is a new tape; this will be ok to use
@@ -114,7 +136,7 @@ if [ "$(ls -A ${TAPE_FILE} 2> /dev/null)" ]; then
          inserted serial   : ${TAPE_SERIAL}
          oldest used serial: ${TAPE_OLDFILE%.log}
 
-         Please remove the old serial logfile or use another tape.
+         Please remove the old serial logfile or use another or new tape.
 
          Best regards,
            backup-script
@@ -125,31 +147,37 @@ fi
 
 touch $TAPE_FILE
 
+#
+# Now we have everything we need. So finnally do the backup.
+#
+
 # rewind this tape (just to be sure)
 MESSAGE="$(mt -f /dev/nst0 rewind)"
 
-# do the backup
-# Something wrong here... MESSAGE="$(tar -c -f - ${SOURCE_FOLDER} &> ${LOGFILE} | mbuffer -q -L -s 256k -m 1G -P 95 -o ${LTO_DEV})"
-MESSAGE="$(tar -c -f - ${SOURCE_FOLDER} | mbuffer -q -L -s 256k -m 1G -P 95 -o ${LTO_DEV})"
-#echo       "tar -c -f - ${SOURCE_FOLDER} | mbuffer -L -s 256k -m 1G -P 95 -o ${LTO_DEV}"
+# Start the backup
+MESSAGE="$(tar -c -v --index-file=${LOGFILE_BASENAME}.index --totals -f - ${SOURCE_FOLDER} 2> ${LOGFILE_BASENAME}.err.txt | mbuffer -q -L -s 256k -m 1G -P 95 -o ${LTO_DEV})"
+#echo       "tar -c -v --index-file=${LOGFILE_BASENAME}.index --totals -f - ${SOURCE_FOLDER} 2> ${LOGFILE_BASENAME}.err | mbuffer -q -L -s 256k -m 1G -P 95 -o ${LTO_DEV}"
 
 ERROR_CODE=$?
 
 if [ $ERROR_CODE -ne 0 ]; then
-   mail -s "Backup -${BACKUP_NAME}- exited with error(s)" -a $LOGFILE $MAIL <<EOM
+   mail -s "Backup -${BACKUP_NAME}- exited with error(s)" -a ${LOGFILE_BASENAME}.index -a ${LOGFILE_BASENAME}.err.txt $MAIL <<EOM
    Hi Admin,
-   the backup for $SOURCE_FOLDER exited with error code $ERROR_CODE. Please check on addtional actions. Detailed output:
+   the backup for $SOURCE_FOLDER exited with error code $ERROR_CODE. Please check on addtional actions. Detailed output or the script below:
 
    $MESSAGE
+
+   Please also check attached index and .err.txt file for further information.
 
    Best regards,
      your backup-script
 EOM
 
 else
-   mail -s "Backup -${BACKUP_NAME}- was successful" -a $LOGFILE $MAIL <<EOM
+   mail -s "Backup -${BACKUP_NAME}- was successful" -a ${LOGFILE_BASENAME}.index -a ${LOGFILE_BASENAME}.err.txt $MAIL <<EOM
    Hi Admin,
-   the backup for $SOURCE_FOLDER went fine. Details at the of the mail.
+   the backup for $SOURCE_FOLDER went fine. Please see the .index file for a list of stored files and the .err.txt file for error output of the tar command (there shouldn\'t be anything).
+
    Please make sure to savely store the tape.
 
    Best regards, 
