@@ -19,10 +19,14 @@ TAPE_DELAY="30s"
 TAPE_CHECK="1440"
 
 # Receiver of result mail
-MAIL="your@email.here"
+MAIL=""
 
 # set maximum Tape Size
 MAX_TAPE_SIZE="500G"
+
+# compress tar index file (with many files the index file can grow quite big); 
+# "y" = yes, "n" = no
+LOGFILE_COMPRESS="y"
 
 #
 # You shouldn't need to change some below here
@@ -33,7 +37,7 @@ DATE="$(date +%Y-%m-%d)"
 TIME="$(date +%H-%M)"
 
 # Create a temporary filename
-LOGFILE_BASENAME="$(mktemp -t tar_output_XXX)"
+LOGFILE_BASENAME="$(mktemp -t backup_XXX)"
 
 # Search in Tape_Folder for the oldest file in the backup-set
 TAPE_OLDFILE="$(ls -tC1 ${TAPE_FOLDER} | tail -n 1)"
@@ -156,12 +160,19 @@ MESSAGE="$(mt -f /dev/nst0 rewind)"
 
 # Start the backup
 MESSAGE="$(tar -c -v --index-file=${LOGFILE_BASENAME}.index --totals -f - ${SOURCE_FOLDER} 2> ${LOGFILE_BASENAME}.err.txt | mbuffer -q -L -s 256k -m 1G -P 95 -o ${LTO_DEV})"
-#echo       "tar -c -v --index-file=${LOGFILE_BASENAME}.index --totals -f - ${SOURCE_FOLDER} 2> ${LOGFILE_BASENAME}.err | mbuffer -q -L -s 256k -m 1G -P 95 -o ${LTO_DEV}"
 
 ERROR_CODE=$?
 
+LOGFILE_INDEX="${LOGFILE_BASENAME}.index"
+if [ $LOGFILE_COMPRESS = "y" ]; then
+   bzip2 ${LOGFILE_INDEX}
+   LOGFILE_INDEX="${LOGFILE_BASENAME}.index.bz2"
+fi
+
+echo $LOGFILE_INDEX
+
 if [ $ERROR_CODE -ne 0 ]; then
-   mail -s "Backup -${BACKUP_NAME}- exited with error(s)" -a ${LOGFILE_BASENAME}.index -a ${LOGFILE_BASENAME}.err.txt $MAIL <<EOM
+   mail -s "Backup -${BACKUP_NAME}- exited with error(s)" -a ${LOGFILE_INDEX} -a ${LOGFILE_BASENAME}.err.txt $MAIL <<EOM
    Hi Admin,
    the backup for $SOURCE_FOLDER exited with error code $ERROR_CODE. Please check on addtional actions. Detailed output or the script below:
 
@@ -174,7 +185,7 @@ if [ $ERROR_CODE -ne 0 ]; then
 EOM
 
 else
-   mail -s "Backup -${BACKUP_NAME}- was successful" -a ${LOGFILE_BASENAME}.index -a ${LOGFILE_BASENAME}.err.txt $MAIL <<EOM
+   mail -s "Backup -${BACKUP_NAME}- was successful" -a ${LOGFILE_INDEX} -a ${LOGFILE_BASENAME}.err.txt $MAIL <<EOM
    Hi Admin,
    the backup for $SOURCE_FOLDER went fine. Please see the .index file for a list of stored files and the .err.txt file for error output of the tar command (there shouldn\'t be anything).
 
@@ -187,3 +198,9 @@ else
    $MESSAGE
 EOM
 fi
+
+# Cleanup of temporary files
+rm ${LOGFILE_INDEX}
+rm ${LOGFILE_BASENAME}
+rm ${LOGFILE_BASENAME}.err.txt
+
